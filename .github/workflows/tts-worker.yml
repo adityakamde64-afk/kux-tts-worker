@@ -1,0 +1,67 @@
+name: KUX TTS Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      tts_text:
+        description: 'Text to convert to speech'
+        required: true
+        type: string
+      tts_engine:
+        description: 'TTS Engine'
+        required: true
+        type: choice
+        options:
+          - kyutai
+          - cartesia
+        default: kyutai
+      tts_voice:
+        description: 'Voice name (leave empty for default)'
+        required: false
+        type: string
+        default: ''
+      tts_language:
+        description: 'Language (Cartesia only)'
+        required: false
+        type: string
+        default: 'American English'
+      worker_id:
+        description: 'Worker ID (1-6)'
+        required: true
+        type: string
+
+jobs:
+  tts-generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright Firefox
+        run: npx playwright install firefox
+
+      - name: Generate TTS Audio
+        env:
+          TTS_TEXT: ${{ github.event.inputs.tts_text }}
+          TTS_ENGINE: ${{ github.event.inputs.tts_engine }}
+          TTS_VOICE: ${{ github.event.inputs.tts_voice }}
+          TTS_LANGUAGE: ${{ github.event.inputs.tts_language }}
+        run: node worker.js
+
+      - name: Upload Audio Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tts-audio-worker-${{ github.event.inputs.worker_id }}
+          path: output/
+          retention-days: 7
