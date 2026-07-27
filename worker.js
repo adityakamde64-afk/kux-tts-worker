@@ -70,7 +70,7 @@ function splitText(text, chunkSize = 500) {
   return chunks;
 }
 
-/* â•â•â• KYUTAI TTS â•â•â• */
+/* KYUTAI TTS */
 async function processKyutaiChunk(context, text, partId) {
   const page = await context.newPage();
   try {
@@ -147,7 +147,7 @@ async function processKyutaiChunk(context, text, partId) {
   }
 }
 
-/* â•â•â• CARTESIA TTS â•â•â• */
+/* CARTESIA TTS */
 function float32ToWav(chunks, sampleRate = 44100) {
   const raw = Buffer.concat(chunks);
   const sampleCount = Math.floor(raw.length / 4);
@@ -170,54 +170,113 @@ function float32ToWav(chunks, sampleRate = 44100) {
 
 async function selectCartesiaMenuItem(page, trigger, searchPlaceholder, wanted, label) {
   await trigger.click();
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(1000);
+
   const popup = page.locator('[data-slot="popover-content"]:visible').last();
-  await popup.getByPlaceholder(searchPlaceholder).fill(wanted);
-  await page.waitForTimeout(500);
-  const options = popup.getByRole('option');
-  const matches = (await options.allInnerTexts()).map(item => item.trim());
-  const exactIndex = matches.findIndex(item => item === wanted);
-  if (exactIndex === -1) {
-    throw new Error(`${label} "${wanted}" not found. Available: ${matches.slice(0, 10).join(', ') || 'none'}`);
+  try {
+    await popup.waitFor({ state: 'visible', timeout: 10000 });
+  } catch {
+    console.log(`[Cartesia] ${label} dropdown not visible, trying alternative...`);
+    const altPopup = page.locator('[role="listbox"]:visible, [role="menu"]:visible, [data-radix-popper-content-wrapper]:visible').last();
+    try {
+      await altPopup.waitFor({ state: 'visible', timeout: 5000 });
+    } catch {
+      console.log(`[Cartesia] ${label} dropdown not found at all, skipping`);
+      await page.keyboard.press('Escape').catch(() => {});
+      return false;
+    }
   }
-  await options.nth(exactIndex).click();
+
+  try {
+    const searchInput = popup.getByPlaceholder(searchPlaceholder);
+    if (await searchInput.isVisible().catch(() => false)) {
+      await searchInput.fill(wanted);
+      await page.waitForTimeout(800);
+    }
+  } catch {}
+
+  try {
+    const options = popup.getByRole('option');
+    const count = await options.count();
+    console.log(`[Cartesia] ${label} dropdown has ${count} options`);
+    if (count === 0) {
+      console.log(`[Cartesia] No ${label} options found, skipping`);
+      await page.keyboard.press('Escape').catch(() => {});
+      return false;
+    }
+
+    const matches = (await options.allInnerTexts()).map(item => item.trim());
+    console.log(`[Cartesia] Available ${label}s: ${matches.slice(0, 10).join(', ') || 'none'}`);
+
+    const exactIndex = matches.findIndex(item => item === wanted);
+    if (exactIndex === -1) {
+      const partialIndex = matches.findIndex(item => item.toLowerCase().includes(wanted.toLowerCase()));
+      if (partialIndex !== -1) {
+        await options.nth(partialIndex).click();
+        console.log(`[Cartesia] ${label} "${wanted}" matched partially: "${matches[partialIndex]}"`);
+        return true;
+      }
+      console.log(`[Cartesia] ${label} "${wanted}" not found, using default`);
+      await page.keyboard.press('Escape').catch(() => {});
+      return false;
+    }
+    await options.nth(exactIndex).click();
+    return true;
+  } catch (e) {
+    console.log(`[Cartesia] ${label} selection error: ${e.message}, using default`);
+    await page.keyboard.press('Escape').catch(() => {});
+    return false;
+  }
 }
 
 async function processCartesiaChunk(context, text, partId) {
   const page = await context.newPage();
   try {
     console.log(`[Part ${partId}] Opening Cartesia Sonic...`);
-    await page.goto('https://www.cartesia.ai/sonic', { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForTimeout(3000);
+    await page.goto('https://www.cartesia.ai/sonic', { waitUntil: 'networkidle', timeout: 90000 });
+    await page.waitForTimeout(5000);
 
     const acceptCookies = page.getByRole('button', { name: 'Accept', exact: true });
     if (await acceptCookies.isVisible().catch(() => false)) {
       await acceptCookies.click().catch(() => {});
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(1000);
     }
 
     const editor = page.locator('[contenteditable="true"].rich-transcript').first();
-    await editor.waitFor({ state: 'visible', timeout: 30000 });
+    try {
+      await editor.waitFor({ state: 'visible', timeout: 30000 });
+    } catch {
+      console.log(`[Part ${partId}] Editor not found with .rich-transcript, trying alternatives...`);
+      const altEditor = page.locator('[contenteditable="true"]').first();
+      await altEditor.waitFor({ state: 'visible', timeout: 30000 });
+    }
     const widget = editor.locator('xpath=ancestor::*[.//button[normalize-space(.)="Play"]][1]');
     const menuTriggers = widget.locator('button[data-slot="popover-trigger"]');
 
-    await selectCartesiaMenuItem(page, menuTriggers.nth(0), 'Search language\u2026', LANGUAGE, 'Language');
-    await page.waitForTimeout(500);
+    const triggerCount = await menuTriggers.count();
+    console.log(`[Part ${partId}] Found ${triggerCount} menu triggers`);
 
-    if (VOICE) {
-      await selectCartesiaMenuItem(page, menuTriggers.nth(1), 'Search voices\u2026', VOICE, 'Voice');
+    if (triggerCount >= 1) {
+      const langSelected = await selectCartesiaMenuItem(page, menuTriggers.nth(0), 'Search language\u2026', LANGUAGE, 'Language');
+      console.log(`[Part ${partId}] Language selection: ${langSelected ? 'done' : 'default'}`);
+      await page.waitForTimeout(1000);
     }
-    await page.waitForTimeout(500);
+
+    if (VOICE && triggerCount >= 2) {
+      const voiceSelected = await selectCartesiaMenuItem(page, menuTriggers.nth(1), 'Search voices\u2026', VOICE, 'Voice');
+      console.log(`[Part ${partId}] Voice selection: ${voiceSelected ? 'done' : 'default'}`);
+      await page.waitForTimeout(1000);
+    }
 
     await editor.click();
     await page.keyboard.press('ControlOrMeta+A');
     await page.keyboard.insertText(text);
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(1000);
 
     const audioChunks = [];
     let resolveAudio, rejectAudio;
     const audioComplete = new Promise((resolve, reject) => { resolveAudio = resolve; rejectAudio = reject; });
-    const audioTimeout = setTimeout(() => rejectAudio(new Error('Audio timeout 45s')), 45000);
+    const audioTimeout = setTimeout(() => rejectAudio(new Error('Audio timeout 60s')), 60000);
 
     page.on('websocket', ws => {
       if (!ws.url().startsWith('wss://api.cartesia.ai/tts/websocket')) return;
@@ -234,7 +293,9 @@ async function processCartesiaChunk(context, text, partId) {
       ws.on('socketerror', error => rejectAudio(new Error(`WebSocket error: ${error}`)));
     });
 
-    await page.getByRole('button', { name: 'Play', exact: true }).first().click();
+    const playBtn = page.getByRole('button', { name: 'Play', exact: true }).first();
+    await playBtn.waitFor({ state: 'visible', timeout: 15000 });
+    await playBtn.click();
     console.log(`[Part ${partId}] Waiting for audio...`);
     await audioComplete;
     clearTimeout(audioTimeout);
@@ -253,14 +314,14 @@ async function processCartesiaChunk(context, text, partId) {
   }
 }
 
-/* â•â•â• MAIN â•â•â• */
+/* MAIN */
 async function main() {
   if (!TEXT) { console.error('TTS_TEXT not set!'); process.exit(1); }
 
   const chunks = splitText(TEXT);
   if (!chunks.length) { console.error('No text chunks to process!'); process.exit(1); }
 
-  console.log(`\nðŸš€ KUX TTS GitHub Worker`);
+  console.log(`\nKUX TTS GitHub Worker`);
   console.log(`   Engine: ${ENGINE}`);
   console.log(`   Parts: ${chunks.length}`);
   console.log(`   Voice: ${VOICE || 'default'}`);
@@ -293,8 +354,8 @@ async function main() {
 
   const succeeded = results.filter(r => r.success).length;
   const failed = results.filter(r => !r.success).length;
-  console.log(`\nðŸ DONE: ${succeeded}/${chunks.length} succeeded, ${failed} failed`);
-  console.log(`ðŸ“ Output: ${path.resolve(OUTPUT_DIR)}`);
+  console.log(`\nDONE: ${succeeded}/${chunks.length} succeeded, ${failed} failed`);
+  console.log(`Output: ${path.resolve(OUTPUT_DIR)}`);
 
   if (succeeded > 0) {
     console.log('\nFiles:');
