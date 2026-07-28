@@ -240,7 +240,7 @@ async function processCartesiaChunk(context, text, partId) {
   const page = await context.newPage();
   try {
     console.log(`[Part ${partId}] Opening Cartesia Sonic (Chromium)...`);
-    await page.goto('https://www.cartesia.ai/sonic', { waitUntil: 'networkidle', timeout: 90000 });
+    await page.goto('https://www.cartesia.ai/sonic', { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForTimeout(8000);
 
     const acceptCookies = page.getByRole('button', { name: 'Accept', exact: true });
