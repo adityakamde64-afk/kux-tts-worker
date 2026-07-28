@@ -1,9 +1,9 @@
 /**
  * KUX TTS GitHub Actions Worker
- * Firefox + Headless + Playwright
+ * Kyutai: Firefox + Cartesia: Chromium
  * Supports: Kyutai TTS + Cartesia Sonic
  */
-import { firefox } from 'playwright';
+import { firefox, chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 
@@ -170,74 +170,81 @@ function float32ToWav(chunks, sampleRate = 44100) {
 
 async function selectCartesiaMenuItem(page, trigger, searchPlaceholder, wanted, label) {
   await trigger.click();
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(1500);
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const popups = page.locator('[data-slot="popover-content"]:visible');
+    const count = await popups.count();
+    if (count > 0) break;
+    const alt = page.locator('[role="listbox"]:visible, [role="menu"]:visible, [data-radix-popper-content-wrapper]:visible');
+    if (await alt.count() > 0) break;
+    console.log(`[Cartesia] ${label} dropdown not visible yet, waiting... (attempt ${attempt + 1})`);
+    await page.waitForTimeout(2000);
+  }
 
   const popup = page.locator('[data-slot="popover-content"]:visible').last();
-  try {
-    await popup.waitFor({ state: 'visible', timeout: 10000 });
-  } catch {
-    console.log(`[Cartesia] ${label} dropdown not visible, trying alternative...`);
+  const isVisible = await popup.isVisible().catch(() => false);
+  if (!isVisible) {
     const altPopup = page.locator('[role="listbox"]:visible, [role="menu"]:visible, [data-radix-popper-content-wrapper]:visible').last();
-    try {
-      await altPopup.waitFor({ state: 'visible', timeout: 5000 });
-    } catch {
-      console.log(`[Cartesia] ${label} dropdown not found at all, skipping`);
+    if (!(await altPopup.isVisible().catch(() => false))) {
+      console.log(`[Cartesia] ${label} dropdown not found, skipping`);
       await page.keyboard.press('Escape').catch(() => {});
       return false;
     }
   }
 
+  const activePopup = (await popup.isVisible().catch(() => false)) ? popup : page.locator('[role="listbox"]:visible, [data-radix-popper-content-wrapper]:visible').last();
+
   try {
-    const searchInput = popup.getByPlaceholder(searchPlaceholder);
-    if (await searchInput.isVisible().catch(() => false)) {
+    const searchInput = activePopup.getByPlaceholder(searchPlaceholder);
+    if (await searchInput.isVisible({ timeout: 3000 }).catch(() => false)) {
       await searchInput.fill(wanted);
-      await page.waitForTimeout(800);
+      await page.waitForTimeout(1000);
     }
   } catch {}
 
-  try {
-    const options = popup.getByRole('option');
-    const count = await options.count();
-    console.log(`[Cartesia] ${label} dropdown has ${count} options`);
-    if (count === 0) {
-      console.log(`[Cartesia] No ${label} options found, skipping`);
-      await page.keyboard.press('Escape').catch(() => {});
-      return false;
-    }
+  for (let waitAttempt = 0; waitAttempt < 5; waitAttempt++) {
+    try {
+      const options = activePopup.getByRole('option');
+      const count = await options.count();
+      console.log(`[Cartesia] ${label} dropdown has ${count} options (attempt ${waitAttempt + 1})`);
+      if (count > 0) {
+        const matches = (await options.allInnerTexts()).map(item => item.trim());
+        console.log(`[Cartesia] Available ${label}s: ${matches.slice(0, 15).join(', ')}`);
 
-    const matches = (await options.allInnerTexts()).map(item => item.trim());
-    console.log(`[Cartesia] Available ${label}s: ${matches.slice(0, 10).join(', ') || 'none'}`);
-
-    const exactIndex = matches.findIndex(item => item === wanted);
-    if (exactIndex === -1) {
-      const partialIndex = matches.findIndex(item => item.toLowerCase().includes(wanted.toLowerCase()));
-      if (partialIndex !== -1) {
-        await options.nth(partialIndex).click();
-        console.log(`[Cartesia] ${label} "${wanted}" matched partially: "${matches[partialIndex]}"`);
-        return true;
+        const exactIndex = matches.findIndex(item => item === wanted);
+        if (exactIndex !== -1) {
+          await options.nth(exactIndex).click();
+          return true;
+        }
+        const partialIndex = matches.findIndex(item => item.toLowerCase().includes(wanted.toLowerCase()));
+        if (partialIndex !== -1) {
+          await options.nth(partialIndex).click();
+          console.log(`[Cartesia] ${label} partial match: "${matches[partialIndex]}"`);
+          return true;
+        }
+        console.log(`[Cartesia] ${label} "${wanted}" not found, using default`);
+        await page.keyboard.press('Escape').catch(() => {});
+        return false;
       }
-      console.log(`[Cartesia] ${label} "${wanted}" not found, using default`);
-      await page.keyboard.press('Escape').catch(() => {});
-      return false;
-    }
-    await options.nth(exactIndex).click();
-    return true;
-  } catch (e) {
-    console.log(`[Cartesia] ${label} selection error: ${e.message}, using default`);
-    await page.keyboard.press('Escape').catch(() => {});
-    return false;
+    } catch {}
+    await page.waitForTimeout(2000);
   }
+
+  console.log(`[Cartesia] ${label} options never loaded, using default`);
+  await page.keyboard.press('Escape').catch(() => {});
+  return false;
 }
 
 async function processCartesiaChunk(context, text, partId) {
   const page = await context.newPage();
   try {
-    console.log(`[Part ${partId}] Opening Cartesia Sonic...`);
+    console.log(`[Part ${partId}] Opening Cartesia Sonic (Chromium)...`);
     await page.goto('https://www.cartesia.ai/sonic', { waitUntil: 'networkidle', timeout: 90000 });
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(8000);
 
     const acceptCookies = page.getByRole('button', { name: 'Accept', exact: true });
-    if (await acceptCookies.isVisible().catch(() => false)) {
+    if (await acceptCookies.isVisible({ timeout: 3000 }).catch(() => false)) {
       await acceptCookies.click().catch(() => {});
       await page.waitForTimeout(1000);
     }
@@ -246,9 +253,8 @@ async function processCartesiaChunk(context, text, partId) {
     try {
       await editor.waitFor({ state: 'visible', timeout: 30000 });
     } catch {
-      console.log(`[Part ${partId}] Editor not found with .rich-transcript, trying alternatives...`);
-      const altEditor = page.locator('[contenteditable="true"]').first();
-      await altEditor.waitFor({ state: 'visible', timeout: 30000 });
+      console.log(`[Part ${partId}] .rich-transcript not found, trying any contenteditable...`);
+      await page.locator('[contenteditable="true"]').first().waitFor({ state: 'visible', timeout: 30000 });
     }
     const widget = editor.locator('xpath=ancestor::*[.//button[normalize-space(.)="Play"]][1]');
     const menuTriggers = widget.locator('button[data-slot="popover-trigger"]');
@@ -258,25 +264,25 @@ async function processCartesiaChunk(context, text, partId) {
 
     if (triggerCount >= 1) {
       const langSelected = await selectCartesiaMenuItem(page, menuTriggers.nth(0), 'Search language\u2026', LANGUAGE, 'Language');
-      console.log(`[Part ${partId}] Language selection: ${langSelected ? 'done' : 'default'}`);
-      await page.waitForTimeout(1000);
+      console.log(`[Part ${partId}] Language: ${langSelected ? 'selected' : 'default'}`);
+      await page.waitForTimeout(1500);
     }
 
     if (VOICE && triggerCount >= 2) {
       const voiceSelected = await selectCartesiaMenuItem(page, menuTriggers.nth(1), 'Search voices\u2026', VOICE, 'Voice');
-      console.log(`[Part ${partId}] Voice selection: ${voiceSelected ? 'done' : 'default'}`);
-      await page.waitForTimeout(1000);
+      console.log(`[Part ${partId}] Voice: ${voiceSelected ? 'selected' : 'default'}`);
+      await page.waitForTimeout(1500);
     }
 
     await editor.click();
     await page.keyboard.press('ControlOrMeta+A');
     await page.keyboard.insertText(text);
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(1500);
 
     const audioChunks = [];
     let resolveAudio, rejectAudio;
     const audioComplete = new Promise((resolve, reject) => { resolveAudio = resolve; rejectAudio = reject; });
-    const audioTimeout = setTimeout(() => rejectAudio(new Error('Audio timeout 60s')), 60000);
+    const audioTimeout = setTimeout(() => rejectAudio(new Error('Audio timeout 90s')), 90000);
 
     page.on('websocket', ws => {
       if (!ws.url().startsWith('wss://api.cartesia.ai/tts/websocket')) return;
@@ -295,8 +301,24 @@ async function processCartesiaChunk(context, text, partId) {
 
     const playBtn = page.getByRole('button', { name: 'Play', exact: true }).first();
     await playBtn.waitFor({ state: 'visible', timeout: 15000 });
-    await playBtn.click();
-    console.log(`[Part ${partId}] Waiting for audio...`);
+
+    const isDisabled = await playBtn.getAttribute('disabled');
+    if (isDisabled !== null) {
+      console.log(`[Part ${partId}] Play button is disabled, trying force click + JS enable...`);
+      await page.evaluate(() => {
+        const btns = document.querySelectorAll('button');
+        for (const b of btns) {
+          if (b.textContent && b.textContent.trim() === 'Play') {
+            b.removeAttribute('disabled');
+            b.removeAttribute('data-disabled');
+          }
+        }
+      });
+      await page.waitForTimeout(500);
+    }
+
+    await playBtn.click({ force: true });
+    console.log(`[Part ${partId}] Play clicked, waiting for audio...`);
     await audioComplete;
     clearTimeout(audioTimeout);
 
@@ -323,12 +345,14 @@ async function main() {
 
   console.log(`\nKUX TTS GitHub Worker`);
   console.log(`   Engine: ${ENGINE}`);
+  console.log(`   Browser: ${ENGINE === 'cartesia' ? 'Chromium' : 'Firefox'}`);
   console.log(`   Parts: ${chunks.length}`);
   console.log(`   Voice: ${VOICE || 'default'}`);
   if (ENGINE === 'cartesia') console.log(`   Language: ${LANGUAGE}`);
   console.log('');
 
-  const browser = await firefox.launch({ headless: true });
+  const browserLauncher = ENGINE === 'cartesia' ? chromium : firefox;
+  const browser = await browserLauncher.launch({ headless: true });
   const results = [];
 
   for (let i = 0; i < chunks.length; i++) {
